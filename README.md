@@ -1,9 +1,9 @@
 ## 개발환경
-   > OS: Windows 10/11
-   > Language: C++17
-   > Framework: Qt 6.x (QOpenGLWidget, QOpenGLFunctions)
-   > Compiler: MinGW 64-bit
-   > Target: .ply 형식의 Gaussian Splatting 데이터 렌더링
+   . OS: Windows 10/11
+   . Language: C++17
+   . Framework: Qt 6.x (QOpenGLWidget, QOpenGLFunctions)
+   . Compiler: MinGW 64-bit
+   . Target: .ply 형식의 Gaussian Splatting 데이터 렌더링
 
 ## 실행 및 확인 방법
    1. Qt Creator를 실행합니다.
