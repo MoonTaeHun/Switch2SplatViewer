@@ -58,13 +58,30 @@ MainWindow::MainWindow(QWidget *parent)
     alphaLayout->addWidget(alphaSlider);
     layout->addWidget(alphaGroup);
 
-    // (3) Upscaling Filter Checkbox (컨트롤 패널에 추가)
+    // (3) Alpha Cutoff Slider
+    QGroupBox *shapnessGroup = new QGroupBox("Shapness");
+    QVBoxLayout *shapnessLayout = new QVBoxLayout(shapnessGroup);
+    QSlider *shapnessSlider = new QSlider(Qt::Horizontal);
+    shapnessSlider->setRange(0, 100); // 0.00 ~ 1.00
+    shapnessSlider->setValue(80);     // Default 0.8
+    shapnessLayout->addWidget(shapnessSlider);
+    layout->addWidget(shapnessGroup);
+
+    // (4) Upscaling Filter Checkbox (컨트롤 패널에 추가)
     QGroupBox *filterGroup = new QGroupBox("Upscaling Filter");
     QVBoxLayout *filterLayout = new QVBoxLayout(filterGroup);
     QCheckBox *filterCheck = new QCheckBox("Smooth (Linear Filtering)");
     filterCheck->setChecked(true); // 기본은 부드럽게
     filterLayout->addWidget(filterCheck);
     layout->addWidget(filterGroup); // 레이아웃에 추가
+
+    // (5) Upscaling Filter Checkbox (컨트롤 패널에 추가)
+    QGroupBox *fsrGroup = new QGroupBox("Use FSR");
+    QVBoxLayout *fsrLayout = new QVBoxLayout(fsrGroup);
+    QCheckBox *fsrCheck = new QCheckBox("Use FSR");
+    fsrCheck->setChecked(true); // 기본은 부드럽게
+    fsrLayout->addWidget(fsrCheck);
+    layout->addWidget(fsrGroup); // 레이아웃에 추가
 
     layout->addStretch(); // 나머지 공간 채우기
     dock->setWidget(panel);
@@ -81,9 +98,19 @@ MainWindow::MainWindow(QWidget *parent)
         m_splatWidget->setAlphaCutoff(cutoff);
     });
 
+    connect(shapnessSlider, &QSlider::valueChanged, [this](int value){
+        float shapnesss = value / 100.0f;
+        m_splatWidget->setShapness(shapnesss);
+    });
+
     connect(filterCheck, &QCheckBox::toggled, [this](bool checked){
         // 체크되면 Linear(부드럽게), 해제되면 Nearest(각지게)
         m_splatWidget->setUpscaleFilter(checked);
+    });
+
+    connect(fsrCheck, &QCheckBox::toggled, [this](bool checked){
+        // 체크되면 Linear(부드럽게), 해제되면 Nearest(각지게)
+        m_splatWidget->setUseFSR(checked);
     });
 
     // 샘플 ply 파일 만들기 위한 코드

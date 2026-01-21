@@ -83,9 +83,19 @@ void SplattingWidget::setAlphaCutoff(float cutoff) {
     update();
 }
 
+void SplattingWidget::setShapness(float value) {
+    m_sharpness = value;
+    update();
+}
+
 void SplattingWidget::setUpscaleFilter(bool isLinear) {
     m_useLinearFilter = isLinear;
     update(); // 즉시 다시 그리기
+}
+
+void SplattingWidget::setUseFSR(bool use) {
+    m_useFSR = use;
+    update();
 }
 
 void SplattingWidget::initializeGL()
@@ -128,6 +138,8 @@ void SplattingWidget::initializeGL()
     m_vao.release();
     m_instanceVbo.release(); // quadVbo는 release 안 해도 됨 (다음 바인딩 때 풀림)
 #endif
+
+    initFSRQuad();
 
     // 3. FBO 생성 (1280x720 고정 해상도, Depth/Stencil 포함)
     QOpenGLFramebufferObjectFormat format;
@@ -199,14 +211,6 @@ void SplattingWidget::paintGL()
         m_needsSort = false; // 정렬 완료
     }
 
-    // 정렬된 데이터를 GPU로 재전송 (VBO Update)
-    if (m_splatCount > 0) {
-        m_instanceVbo.bind();
-        // 메모리 전체를 덮어쓰기 (write는 allocate보다 빠름)
-        m_instanceVbo.write(0, m_splats.data(), m_splatCount * sizeof(RenderSplat));
-        m_instanceVbo.release();
-    }
-
     // --- [Step 1: Off-screen Rendering] ---
     m_fbo->bind(); // FBO에 그리기 시작
     
@@ -270,20 +274,52 @@ void SplattingWidget::paintGL()
     m_fbo->release(); // FBO 그리기 종료 (다시 기본 프레임버퍼로 돌아옴)
 
 
-    // --- [Step 2: Upscaling to Screen] ---
-    // 현재 윈도우 크기(this->width(), this->height())에 맞춰 FBO 내용을 복사(Blit)합니다.
-    // OpenGL의 Blit 기능을 사용하면 하드웨어 가속을 통해 자동으로 스케일링됩니다.
-    
-    // 읽기 버퍼: 우리가 그린 FBO
-    // 쓰기 버퍼: 현재 화면 (ID 0 또는 Qt가 관리하는 기본 FBO)
-    QOpenGLFramebufferObject::blitFramebuffer(
-        nullptr,            // 타겟 (nullptr이면 현재 바인딩된 기본 FBO = 화면)
-        QRect(0, 0, width(), height()),     // 타겟 영역 (창 전체)
-        m_fbo,              // 소스 FBO
-        QRect(0, 0, INTERNAL_WIDTH, INTERNAL_HEIGHT), // 소스 영역 (720p)
-        GL_COLOR_BUFFER_BIT, 
-        m_useLinearFilter ? GL_LINEAR : GL_NEAREST           // 필터링: GL_LINEAR(부드럽게), GL_NEAREST(픽셀화)
-    );
+    if(m_useFSR)
+    {
+        // 2. On-screen Rendering (화면 늘리기 + FSR 적용)
+        QSize windowSize = this->size(); // 현재 윈도우 크기 (예: 4K)
+        glViewport(0, 0, windowSize.width(), windowSize.height());
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        m_fsrShader->bind();
+
+        // 보통 Post-processing 단계에서는 덮어쓰기(Replace)가 정석이므로
+        // 블렌딩을 끄는 것이 깔끔할 수 있습니다.
+        glDisable(GL_BLEND);
+
+        // 만약 배경 투명도를 살려야 한다면 아래 코드 사용:
+        // glEnable(GL_BLEND);
+        // glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+        // FBO 텍스처를 0번 슬롯에 바인딩
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, m_fbo->texture());
+
+        // Uniform 값 전달
+        m_fsrShader->setUniformValue("screenTexture", 0);
+        m_fsrShader->setUniformValue("sharpness", m_sharpness); // 0.0 ~ 1.0 값 조절
+
+        renderFSRQuad();
+
+        m_fsrShader->release();
+    }
+    else
+    {
+        // --- [Step 2: Upscaling to Screen] ---
+        // 현재 윈도우 크기(this->width(), this->height())에 맞춰 FBO 내용을 복사(Blit)합니다.
+        // OpenGL의 Blit 기능을 사용하면 하드웨어 가속을 통해 자동으로 스케일링됩니다.
+
+        // 읽기 버퍼: 우리가 그린 FBO
+        // 쓰기 버퍼: 현재 화면 (ID 0 또는 Qt가 관리하는 기본 FBO)
+        QOpenGLFramebufferObject::blitFramebuffer(
+            nullptr,            // 타겟 (nullptr이면 현재 바인딩된 기본 FBO = 화면)
+            QRect(0, 0, width(), height()),     // 타겟 영역 (창 전체)
+            m_fbo,              // 소스 FBO
+            QRect(0, 0, INTERNAL_WIDTH, INTERNAL_HEIGHT), // 소스 영역 (720p)
+            GL_COLOR_BUFFER_BIT,
+            m_useLinearFilter ? GL_LINEAR : GL_NEAREST           // 필터링: GL_LINEAR(부드럽게), GL_NEAREST(픽셀화)
+            );
+    }
 
     // 5. QPainter로 FPS 텍스트 오버레이
     // OpenGL 렌더링 후 QPainter를 쓰면 위에 덧그려짐
@@ -362,9 +398,107 @@ void SplattingWidget::initShaders()
         }
     )";
 
+    const char *fsrvshader = R"(
+        #version 450 core
+
+        layout(location = 0) in vec2 aPos;      // Attribute 0: 위치
+        layout(location = 1) in vec2 aTexCoord; // Attribute 1: UV
+
+        out vec2 vTexCoord; // Fragment Shader(fsr.frag)로 넘겨줄 UV
+
+        void main()
+        {
+            vTexCoord = aTexCoord;
+            // 입력된 XY 좌표(-1 ~ 1)를 그대로 사용하여 화면 전체를 덮음
+            gl_Position = vec4(aPos.x, aPos.y, 0.0, 1.0);
+        }
+    )";
+
+    const char *fsrfshader = R"(
+        #version 450 core
+
+        in vec2 vTexCoord;
+        out vec4 outColor;
+
+        uniform sampler2D screenTexture;
+        uniform float sharpness; // 0.0 ~ 1.0
+
+        // RGB를 루마(밝기)로 변환하는 함수
+        float GetLuma(vec3 rgb) {
+            return dot(rgb, vec3(0.299, 0.587, 0.114));
+        }
+
+        vec4 FsrRcas(vec2 uv) {
+            ivec2 texSize = textureSize(screenTexture, 0);
+            ivec2 coord = ivec2(uv * vec2(texSize));
+
+            // [1] 샘플링 (RGB + Alpha)
+            vec4 c_full = texelFetch(screenTexture, coord, 0);
+            vec4 t_full = texelFetch(screenTexture, coord + ivec2(0, -1), 0);
+            vec4 b_full = texelFetch(screenTexture, coord + ivec2(0, 1), 0);
+            vec4 l_full = texelFetch(screenTexture, coord + ivec2(-1, 0), 0);
+            vec4 r_full = texelFetch(screenTexture, coord + ivec2(1, 0), 0);
+
+            vec3 c = c_full.rgb;
+            vec3 t = t_full.rgb;
+            vec3 b = b_full.rgb;
+            vec3 l = l_full.rgb;
+            vec3 r = r_full.rgb;
+            float alpha = c_full.a;
+
+            // [2] 컨트라스트 분석 (밴딩 방지 핵심)
+            // 주변 픽셀들의 밝기 차이가 거의 없다면(평평한 면), 샤픈을 주면 안 됩니다.
+            // 여기서 억지로 샤픈을 주면 '이상한 선'이 생깁니다.
+            float lumaC = GetLuma(c);
+            float lumaT = GetLuma(t);
+            float lumaB = GetLuma(b);
+            float lumaL = GetLuma(l);
+            float lumaR = GetLuma(r);
+
+            // 주변 밝기의 최대/최소 차이 계산
+            float minLuma = min(lumaC, min(min(lumaT, lumaB), min(lumaL, lumaR)));
+            float maxLuma = max(lumaC, max(max(lumaT, lumaB), max(lumaL, lumaR)));
+            float range = maxLuma - minLuma;
+
+            // [3] 샤픈 강도 동적 조절 (Adaptive Sharpening)
+            // range(밝기 차이)가 너무 작으면 샤프니스 강도(w)를 0으로 만듭니다.
+            // 즉, 노이즈나 그라데이션에서는 작동을 멈춥니다.
+
+            float sharpLinear = clamp(sharpness, 0.0, 1.0);
+
+            // 기본 가중치 (-0.5 ~ 0.0) -> 값을 조금 더 부드럽게 낮췄습니다.
+            float w = sharpLinear * -0.15;
+
+            // 범위가 0에 가까우면 가중치도 0으로 (Zero division 방지 및 노이즈 제거)
+            if (range < 0.001) {
+                w = 0.0;
+            }
+
+            // [4] 컨볼루션 연산
+            vec3 neighbors = t + b + l + r;
+            vec3 result_rgb = (c + w * neighbors) / (1.0 + 4.0 * w);
+
+            // [5] 최종 Clamping (0~1 범위만 제한)
+            // 아까 문제가 됐던 bMin/bMax 클램핑은 삭제했습니다.
+            // 대신 기본적인 0.0~1.0 오버플로우만 막습니다.
+            result_rgb = clamp(result_rgb, 0.0, 1.0);
+
+            return vec4(result_rgb, alpha);
+        }
+
+        void main() {
+            outColor = FsrRcas(vTexCoord);
+        }
+    )";
+
     m_program->addShaderFromSourceCode(QOpenGLShader::Vertex, vshader);
     m_program->addShaderFromSourceCode(QOpenGLShader::Fragment, fshader);
     m_program->link();
+
+    m_fsrShader = new QOpenGLShaderProgram;
+    m_fsrShader->addShaderFromSourceCode(QOpenGLShader::Vertex, fsrvshader);
+    m_fsrShader->addShaderFromSourceCode(QOpenGLShader::Fragment, fsrfshader);
+    m_fsrShader->link();
 }
 
 #if 0
@@ -392,6 +526,46 @@ void SplattingWidget::initGeometry()
     m_vbo.release();
 }
 #endif
+
+void SplattingWidget::initFSRQuad()
+{
+    // 화면 전체를 덮는 사각형 정점 데이터 (Triangle Strip 사용)
+    // 포맷: { X, Y,   U, V }
+    float quadVertices[] = {
+        // 위치(XY)    // 텍스처 좌표(UV)
+        -1.0f,  1.0f,  0.0f, 1.0f, // 왼쪽 위
+        -1.0f, -1.0f,  0.0f, 0.0f, // 왼쪽 아래
+        1.0f,  1.0f,  1.0f, 1.0f, // 오른쪽 위
+        1.0f, -1.0f,  1.0f, 0.0f  // 오른쪽 아래
+    };
+
+    m_fsrvao.create();
+    m_fsrvao.bind();
+
+    m_fsrquadVBO.create();
+    m_fsrquadVBO.bind();
+    m_fsrquadVBO.allocate(quadVertices, sizeof(quadVertices));
+
+    // Attribute 0: 위치 (vec2 position)
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
+
+    // Attribute 1: 텍스처 좌표 (vec2 texCoord)
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)(2 * sizeof(float)));
+
+    m_fsrquadVBO.release();
+    m_fsrvao.release();
+}
+
+void SplattingWidget::renderFSRQuad()
+{
+    m_fsrvao.bind();
+    // Triangle Strip 모드로 4개의 점을 이어 사각형을 그립니다.
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+
+    m_fsrvao.release();
+}
 
 void SplattingWidget::sortSplats(const QMatrix4x4& viewMatrix)
 {

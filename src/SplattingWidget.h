@@ -28,9 +28,11 @@ public:
     // UI에서 조절할 설정값 세터(Setter)
     void setGlobalScale(float scale);
     void setAlphaCutoff(float cutoff);
+    void setShapness(float value);
 
     // 필터링 모드 설정 함수
     void setUpscaleFilter(bool isLinear);
+    void setUseFSR(bool use);
 
 protected:
     void initializeGL() override;
@@ -54,6 +56,9 @@ private:
     // 정렬 함수
     void sortSplats(const QMatrix4x4& viewMatrix);
 
+    void initFSRQuad();   // 초기화 함수 (initializeGL에서 호출)
+    void renderFSRQuad(); // 그리기 함수 (paintGL에서 호출)
+
 private:
     // 핵심: 오프스크린 렌더링용 FBO
     QOpenGLFramebufferObject *m_fbo = nullptr;
@@ -64,9 +69,12 @@ private:
 
     // OpenGL 리소스
     QOpenGLShaderProgram *m_program = nullptr;
+    QOpenGLShaderProgram *m_fsrShader = nullptr;
     QOpenGLVertexArrayObject m_vao;
+    QOpenGLVertexArrayObject m_fsrvao;
     QOpenGLBuffer m_instanceVbo; // 데이터(위치/색상) 담는 버퍼
     QOpenGLBuffer m_quadVbo;     // 사각형 모양 담는 버퍼
+    QOpenGLBuffer m_fsrquadVBO;
 
     Camera m_camera;
 
@@ -80,6 +88,7 @@ private:
     bool m_needsSort = false;    // 정렬이 필요한가?
     float m_globalScale = 1.0f;  // 전체 크기 조절
     float m_alphaCutoff = 0.05f; // 투명도 컷오프
+    float m_sharpness = 0.5f;    // 샤프니스 조절 변수 (기본값 강하게)
 
     // FPS 측정용
     QElapsedTimer m_fpsTimer;
@@ -88,6 +97,7 @@ private:
 
     // 필터링 모드 변수 (기본값 true: 부드럽게)
     bool m_useLinearFilter = true;
+    bool m_useFSR = true;
 };
 
 #endif // SPLATTINGWIDGET_H
